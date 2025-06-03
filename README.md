@@ -61,6 +61,12 @@ python main.py sync-deleted-messages --data-dir ./data
 
 # Use custom number of worker threads
 python main.py sync --data-dir ./data --workers 8
+
+# Create an email manually in the databse to be sent. Edit the python file manually to change contents of the email
+python gmail_to_sqlite/new_email.py
+
+# Sync the changes made locally to gmail. The other syncs work for different usecases, this gives the ability to send emails on your behalf.
+python main.py sync-to-gmail --data-dir ./data
 ```
 
 ### Command Line Arguments
