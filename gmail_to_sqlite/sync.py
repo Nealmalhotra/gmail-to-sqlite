@@ -3,6 +3,7 @@ import logging
 import socket
 import time
 from typing import Any, Callable, Dict, List, Optional, Set
+from datetime import datetime
 
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
@@ -496,3 +497,295 @@ def single_message(
             logging.error(f"Failed to fetch message {message_id}: {str(e)}")
     finally:
         pass
+
+
+def _send_message_to_gmail(
+    service: Any,
+    message: db.Message,
+    check_interrupt: Optional[Callable[[], bool]] = None,
+) -> Optional[str]:
+    """
+    Send a single message to Gmail using the Gmail API.
+
+    Args:
+        service: The Gmail API service object.
+        message: The message object from the database.
+        check_interrupt: Optional callback that returns True if process should be interrupted.
+
+    Returns:
+        Optional[str]: The Gmail message ID if successful, None if failed.
+
+    Raises:
+        InterruptedError: If the process was interrupted.
+        SyncError: If the message cannot be sent after all retries.
+    """
+    from .utils import build_raw_message
+    
+    for attempt in range(MAX_RETRY_ATTEMPTS):
+        if check_interrupt and check_interrupt():
+            raise InterruptedError("Process was interrupted")
+
+        try:
+            # Convert database message to dict format for build_raw_message
+            message_dict = {
+                "sender": message.sender,
+                "recipients": message.recipients,
+                "subject": message.subject or "",
+                "body": message.body or ""
+            }
+            
+            # Build the raw message
+            raw_message = build_raw_message(message_dict)
+            
+            # Send the message
+            send_request = {
+                'raw': raw_message
+            }
+            
+            # If this is a reply, include the thread ID
+            if message.thread_id and message.thread_id != message.message_id:
+                send_request['threadId'] = message.thread_id
+            
+            result = service.users().messages().send(
+                userId="me", 
+                body=send_request
+            ).execute()
+            
+            return result.get('id')
+
+        except HttpError as e:
+            if e.resp.status >= 500 and attempt < MAX_RETRY_ATTEMPTS - 1:
+                logging.warning(
+                    f"Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} failed to send message {message.message_id} "
+                    f"due to server error {e.resp.status}. Retrying in {RETRY_DELAY_SECONDS}s..."
+                )
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = (
+                    f"Failed to send message {message.message_id} after {attempt + 1} attempts "
+                    f"due to HttpError {e.resp.status}: {str(e)}"
+                )
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+        except (TimeoutError, socket.timeout) as e:
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                logging.warning(
+                    f"Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} failed to send message {message.message_id} "
+                    f"due to timeout. Retrying in {RETRY_DELAY_SECONDS}s..."
+                )
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = (
+                    f"Failed to send message {message.message_id} after {attempt + 1} attempts "
+                    f"due to timeout: {str(e)}"
+                )
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+        except Exception as e:
+            logging.error(
+                f"Unexpected error sending message {message.message_id} on attempt {attempt + 1}: {str(e)}"
+            )
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = f"Failed to send message {message.message_id} after {MAX_RETRY_ATTEMPTS} attempts"
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+    # This should never be reached due to the exception handling above
+    raise SyncError(f"Unexpected error: failed to send message {message.message_id}")
+
+
+def _delete_message_from_gmail(
+    service: Any,
+    message_id: str,
+    check_interrupt: Optional[Callable[[], bool]] = None,
+) -> bool:
+    """
+    Delete a single message from Gmail using the Gmail API.
+
+    Args:
+        service: The Gmail API service object.
+        message_id: The Gmail message ID to delete.
+        check_interrupt: Optional callback that returns True if process should be interrupted.
+
+    Returns:
+        bool: True if successful, False if failed.
+
+    Raises:
+        InterruptedError: If the process was interrupted.
+        SyncError: If the message cannot be deleted after all retries.
+    """
+    for attempt in range(MAX_RETRY_ATTEMPTS):
+        if check_interrupt and check_interrupt():
+            raise InterruptedError("Process was interrupted")
+
+        try:
+            service.users().messages().delete(
+                userId="me", 
+                id=message_id
+            ).execute()
+            
+            return True
+
+        except HttpError as e:
+            if e.resp.status == 404:
+                # Message doesn't exist in Gmail anymore, consider it "deleted"
+                logging.info(f"Message {message_id} not found in Gmail (already deleted)")
+                return True
+            elif e.resp.status >= 500 and attempt < MAX_RETRY_ATTEMPTS - 1:
+                logging.warning(
+                    f"Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} failed to delete message {message_id} "
+                    f"due to server error {e.resp.status}. Retrying in {RETRY_DELAY_SECONDS}s..."
+                )
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = (
+                    f"Failed to delete message {message_id} after {attempt + 1} attempts "
+                    f"due to HttpError {e.resp.status}: {str(e)}"
+                )
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+        except (TimeoutError, socket.timeout) as e:
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                logging.warning(
+                    f"Attempt {attempt + 1}/{MAX_RETRY_ATTEMPTS} failed to delete message {message_id} "
+                    f"due to timeout. Retrying in {RETRY_DELAY_SECONDS}s..."
+                )
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = (
+                    f"Failed to delete message {message_id} after {attempt + 1} attempts "
+                    f"due to timeout: {str(e)}"
+                )
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+        except Exception as e:
+            logging.error(
+                f"Unexpected error deleting message {message_id} on attempt {attempt + 1}: {str(e)}"
+            )
+            if attempt < MAX_RETRY_ATTEMPTS - 1:
+                if check_interrupt and check_interrupt():
+                    raise InterruptedError("Process was interrupted")
+                time.sleep(RETRY_DELAY_SECONDS)
+            else:
+                error_msg = f"Failed to delete message {message_id} after {MAX_RETRY_ATTEMPTS} attempts"
+                logging.error(error_msg)
+                raise SyncError(error_msg)
+
+    # This should never be reached due to the exception handling above
+    raise SyncError(f"Unexpected error: failed to delete message {message_id}")
+
+
+def sync_local_changes_to_gmail(
+    credentials: Any,
+    check_shutdown: Optional[Callable[[], bool]] = None,
+) -> int:
+    """
+    Sync local database changes to Gmail by sending new messages and deleting messages.
+
+    Args:
+        credentials: The credentials used to authenticate the Gmail API.
+        check_shutdown (callable): A callback function that returns True if shutdown is requested.
+
+    Returns:
+        int: Total number of operations performed (sends + deletes).
+    """
+    total_operations = 0
+    
+    try:
+        service = _create_service(credentials)
+        
+        # Process pending inserts (new messages to send)
+        pending_inserts = db.get_pending_inserts()
+        logging.info(f"Found {len(pending_inserts)} messages to send to Gmail")
+        
+        for message in pending_inserts:
+            if check_shutdown and check_shutdown():
+                logging.info("Shutdown requested during message sending")
+                break
+                
+            try:
+                gmail_message_id = _send_message_to_gmail(
+                    service, 
+                    message, 
+                    check_interrupt=check_shutdown
+                )
+                
+                if gmail_message_id:
+                    # Update the local message with the Gmail message ID and mark as synced
+                    db.Message.update(
+                        message_id=gmail_message_id,
+                        remote_synced=True,
+                        last_indexed=datetime.now()
+                    ).where(
+                        db.Message.message_id == message.message_id
+                    ).execute()
+                    
+                    logging.info(
+                        f"Successfully sent message to Gmail. Local ID: {message.message_id}, "
+                        f"Gmail ID: {gmail_message_id}"
+                    )
+                    total_operations += 1
+                else:
+                    logging.error(f"Failed to get Gmail message ID for {message.message_id}")
+                    db.mark_message_failed(message.message_id)
+                    
+            except InterruptedError:
+                logging.info(f"Message sending for {message.message_id} was interrupted")
+                break
+            except Exception as e:
+                logging.error(f"Failed to send message {message.message_id}: {str(e)}")
+                db.mark_message_failed(message.message_id)
+        
+        # Process pending deletes (messages to delete from Gmail)
+        pending_deletes = db.get_pending_deletes()
+        logging.info(f"Found {len(pending_deletes)} messages to delete from Gmail")
+        
+        for message in pending_deletes:
+            if check_shutdown and check_shutdown():
+                logging.info("Shutdown requested during message deletion")
+                break
+                
+            try:
+                success = _delete_message_from_gmail(
+                    service, 
+                    message.message_id, 
+                    check_interrupt=check_shutdown
+                )
+                
+                if success:
+                    db.mark_message_synced(message.message_id)
+                    logging.info(f"Successfully deleted message {message.message_id} from Gmail")
+                    total_operations += 1
+                else:
+                    logging.error(f"Failed to delete message {message.message_id} from Gmail")
+                    db.mark_message_failed(message.message_id)
+                    
+            except InterruptedError:
+                logging.info(f"Message deletion for {message.message_id} was interrupted")
+                break
+            except Exception as e:
+                logging.error(f"Failed to delete message {message.message_id}: {str(e)}")
+                db.mark_message_failed(message.message_id)
+        
+        logging.info(f"Completed sync to Gmail. Total operations: {total_operations}")
+        return total_operations
+        
+    except Exception as e:
+        logging.error(f"Error during sync to Gmail: {str(e)}")
+        raise SyncError(f"Failed to sync local changes to Gmail: {e}")

@@ -6,36 +6,23 @@ when new features are added or existing schema needs to be modified.
 """
 
 import logging
-from typing import Optional
+from typing import List, Optional
 
 from peewee import BooleanField, SQL
 from playhouse.migrate import SqliteMigrator, migrate
 
 from .db import database_proxy, Message, SchemaVersion
+from .schema_migrations.v1_add_is_deleted_column import run as migration_v1_run
+from .schema_migrations.v2_add_pending_action_columns import run as migration_v2_run
 
 
 logger = logging.getLogger(__name__)
 
-
-def column_exists(table_name: str, column_name: str) -> bool:
-    """
-    Check if a column exists in a table.
-
-    Args:
-        table_name (str): The name of the table.
-        column_name (str): The name of the column to check.
-
-    Returns:
-        bool: True if the column exists, False otherwise.
-    """
-    try:
-        # PRAGMA table_info doesn't support parameter binding for table names
-        cursor = database_proxy.obj.execute_sql(f"PRAGMA table_info({table_name})")
-        columns = [row[1] for row in cursor.fetchall()]
-        return column_name in columns
-    except Exception as e:
-        logger.error(f"Error checking if column {column_name} exists: {e}")
-        return False
+# List of migration functions in order
+MIGRATIONS: List[callable] = [
+    migration_v1_run,
+    migration_v2_run,
+]
 
 
 def get_schema_version() -> int:
@@ -91,9 +78,7 @@ def run_migrations() -> bool:
 
         if current_version == 0:
             logger.info("Running migration v1: add is_deleted column")
-            from .schema_migrations.v1_add_is_deleted_column import run
-
-            if run():
+            if migration_v1_run():
                 if set_schema_version(1):
                     logger.info("Migration v1 completed successfully, version set to 1")
                 else:
@@ -102,7 +87,18 @@ def run_migrations() -> bool:
             else:
                 logger.error("Migration v1 failed")
                 return False
-        elif current_version >= 1:
+        elif current_version == 1:
+            logger.info("Running migration v2: add pending_action columns")
+            if migration_v2_run():
+                if set_schema_version(2):
+                    logger.info("Migration v2 completed successfully, version set to 2")
+                else:
+                    logger.error("Failed to set schema version to 2")
+                    return False
+            else:
+                logger.error("Migration v2 failed")
+                return False
+        elif current_version >= 2:
             logger.info(
                 f"Database already at version {current_version}, no migrations needed"
             )

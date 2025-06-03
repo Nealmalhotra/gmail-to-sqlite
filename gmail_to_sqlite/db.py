@@ -61,6 +61,8 @@ class Message(Model):
         is_outgoing BooleanField(): Indicates whether the message was sent by the user.
         is_deleted (BooleanField): Indicates whether the message has been deleted from Gmail.
         last_indexed (DateTimeField): The timestamp when the message was last indexed.
+        pending_action (TextField): Tracks pending actions ('insert' or 'delete').
+        remote_synced (BooleanField): Indicates whether the pending action has been synced.
 
     Meta:
         database (Database): The database connection to use.
@@ -80,6 +82,8 @@ class Message(Model):
     is_outgoing = BooleanField()
     is_deleted = BooleanField(default=False)
     last_indexed = DateTimeField()
+    pending_action = TextField(null=True)
+    remote_synced = BooleanField(default=False)
 
     class Meta:
         database = database_proxy
@@ -256,3 +260,136 @@ def get_deleted_message_ids() -> List[str]:
         ]
     except Exception as e:
         raise DatabaseError(f"Failed to retrieve deleted message IDs: {e}")
+
+
+def get_pending_inserts() -> List[Message]:
+    """
+    Returns all messages that need to be sent to Gmail.
+    
+    Returns:
+        List[Message]: List of messages with pending_action='insert' and remote_synced=False.
+        
+    Raises:
+        DatabaseError: If the query fails.
+    """
+    try:
+        return list(
+            Message.select().where(
+                (Message.pending_action == 'insert') & 
+                (Message.remote_synced == False)
+            )
+        )
+    except Exception as e:
+        raise DatabaseError(f"Failed to retrieve pending inserts: {e}")
+
+
+def get_pending_deletes() -> List[Message]:
+    """
+    Returns all messages that need to be deleted from Gmail.
+    
+    Returns:
+        List[Message]: List of messages with pending_action='delete' and remote_synced=False.
+        
+    Raises:
+        DatabaseError: If the query fails.
+    """
+    try:
+        return list(
+            Message.select().where(
+                (Message.pending_action == 'delete') & 
+                (Message.remote_synced == False)
+            )
+        )
+    except Exception as e:
+        raise DatabaseError(f"Failed to retrieve pending deletes: {e}")
+
+
+def mark_message_synced(message_id: str) -> None:
+    """
+    Mark a message as successfully synced to Gmail.
+    
+    Args:
+        message_id (str): The message ID to mark as synced.
+        
+    Raises:
+        DatabaseError: If the update fails.
+    """
+    try:
+        Message.update(remote_synced=True, last_indexed=datetime.now()).where(
+            Message.message_id == message_id
+        ).execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to mark message {message_id} as synced: {e}")
+
+
+def mark_message_failed(message_id: str) -> None:
+    """
+    Clear the pending action for a message that failed to sync.
+    
+    Args:
+        message_id (str): The message ID to clear pending action for.
+        
+    Raises:
+        DatabaseError: If the update fails.
+    """
+    try:
+        Message.update(
+            pending_action=None, 
+            remote_synced=False, 
+            last_indexed=datetime.now()
+        ).where(
+            Message.message_id == message_id
+        ).execute()
+    except Exception as e:
+        raise DatabaseError(f"Failed to mark message {message_id} as failed: {e}")
+
+
+def create_local_message(
+    sender: dict,
+    recipients: dict, 
+    subject: str,
+    body: str,
+    thread_id: str = None
+) -> str:
+    """
+    Create a new message locally that will be sent to Gmail.
+    
+    Args:
+        sender (dict): Sender information with name and email.
+        recipients (dict): Recipients organized by type (to, cc, bcc).
+        subject (str): Message subject.
+        body (str): Message body text.
+        thread_id (str, optional): Thread ID if replying to a thread.
+        
+    Returns:
+        str: The local message ID that was created.
+        
+    Raises:
+        DatabaseError: If the message cannot be created.
+    """
+    try:
+        import uuid
+        local_message_id = str(uuid.uuid4())
+        last_indexed = datetime.now()
+        
+        Message.create(
+            message_id=local_message_id,
+            thread_id=thread_id or local_message_id,
+            sender=sender,
+            recipients=recipients,
+            labels=[],
+            subject=subject,
+            body=body,
+            size=len(body.encode('utf-8')),
+            timestamp=last_indexed,
+            is_read=True,  # Outgoing messages are considered "read"
+            is_outgoing=True,
+            is_deleted=False,
+            last_indexed=last_indexed,
+            pending_action='insert',
+            remote_synced=False
+        )
+        
+        return local_message_id
+    except Exception as e:
+        raise DatabaseError(f"Failed to create local message: {e}")

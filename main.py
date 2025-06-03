@@ -86,45 +86,56 @@ def setup_logging() -> None:
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
-    """Create and configure the command line argument parser."""
+    """Create and configure the argument parser."""
     parser = argparse.ArgumentParser(
-        description="Gmail to SQLite synchronization tool",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Commands:
-  sync                     Sync all messages (incremental by default)
-  sync-message             Sync a single message by ID
-  sync-deleted-messages    Detect and mark deleted messages
-
-Examples:
-  %(prog)s sync --data-dir ./data
-  %(prog)s sync --data-dir ./data --full-sync
-  %(prog)s sync-message --data-dir ./data --message-id abc123
-        """,
+        description="Sync Gmail messages to SQLite database"
     )
 
-    parser.add_argument(
-        "command",
-        choices=["sync", "sync-message", "sync-deleted-messages"],
-        help="The command to run",
+    # Add subcommands
+    subparsers = parser.add_subparsers(dest="command", help="Available commands")
+
+    # Sync command
+    sync_parser = subparsers.add_parser("sync", help="Sync messages from Gmail")
+    sync_parser.add_argument(
+        "--data-dir", required=True, help="Directory to store the database"
     )
-    parser.add_argument(
-        "--data-dir", required=True, help="The path where the data should be stored"
-    )
-    parser.add_argument(
+    sync_parser.add_argument(
         "--full-sync",
         action="store_true",
-        help="Force a full sync of all messages and detect deleted messages",
+        help="Perform a full sync instead of incremental",
     )
-    parser.add_argument(
-        "--message-id",
-        help="The ID of the message to sync (required for sync-message command)",
-    )
-    parser.add_argument(
+    sync_parser.add_argument(
         "--workers",
         type=int,
         default=DEFAULT_WORKERS,
-        help=f"Number of worker threads for parallel fetching (default: {DEFAULT_WORKERS})",
+        help=f"Number of worker threads (default: {DEFAULT_WORKERS})",
+    )
+
+    # Sync message command
+    sync_message_parser = subparsers.add_parser(
+        "sync-message", help="Sync a specific message"
+    )
+    sync_message_parser.add_argument(
+        "--data-dir", required=True, help="Directory to store the database"
+    )
+    sync_message_parser.add_argument(
+        "--message-id", required=True, help="ID of the message to sync"
+    )
+
+    # Sync deleted messages command
+    sync_deleted_parser = subparsers.add_parser(
+        "sync-deleted-messages", help="Detect and mark deleted messages"
+    )
+    sync_deleted_parser.add_argument(
+        "--data-dir", required=True, help="Directory to store the database"
+    )
+
+    # Sync to Gmail command
+    sync_to_gmail_parser = subparsers.add_parser(
+        "sync-to-gmail", help="Sync local changes to Gmail"
+    )
+    sync_to_gmail_parser.add_argument(
+        "--data-dir", required=True, help="Directory to store the database"
     )
 
     return parser
@@ -171,6 +182,11 @@ def main() -> None:
                 )
             elif args.command == "sync-deleted-messages":
                 sync.sync_deleted_messages(credentials, check_shutdown=check_shutdown)
+            elif args.command == "sync-to-gmail":
+                operations_count = sync.sync_local_changes_to_gmail(
+                    credentials, check_shutdown=check_shutdown
+                )
+                logging.info(f"Completed sync to Gmail with {operations_count} operations")
 
             db_conn.close()
             logging.info("Operation completed successfully")

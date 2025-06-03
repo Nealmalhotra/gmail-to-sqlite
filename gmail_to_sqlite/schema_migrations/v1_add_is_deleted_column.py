@@ -10,7 +10,7 @@ from peewee import BooleanField
 from playhouse.migrate import SqliteMigrator, migrate
 
 from ..db import database_proxy
-from ..migrations import column_exists
+from ..utils import column_exists
 
 
 logger = logging.getLogger(__name__)

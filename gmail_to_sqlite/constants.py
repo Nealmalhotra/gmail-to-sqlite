@@ -6,7 +6,11 @@ from typing import List
 
 # API Configuration
 GMAIL_API_VERSION: str = "v1"
-GMAIL_SCOPES: List[str] = ["https://www.googleapis.com/auth/gmail.readonly"]
+GMAIL_SCOPES: List[str] = [
+    "https://www.googleapis.com/auth/gmail.readonly",
+    "https://www.googleapis.com/auth/gmail.send",
+    "https://www.googleapis.com/auth/gmail.modify"
+]
 OAUTH2_CREDENTIALS_FILE: str = "credentials.json"
 TOKEN_FILE_NAME: str = "token.json"
 DATABASE_FILE_NAME: str = "messages.db"
